@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -16,9 +17,33 @@ from pymatgen.core import Lattice, Structure
 from scipy.optimize import differential_evolution
 from scipy.signal import find_peaks
 
+APP_DIR = Path(__file__).resolve().parent
+SAMPLE_XRD_PATH = APP_DIR / "sample_data" / "nb2alc_dummy.csv"
+ENV_PATH = APP_DIR / ".env"
+
 CU_KA = 1.5406
 DEFAULT_A = 3.107
 DEFAULT_C = 13.888
+
+
+def get_openai_api_key() -> str:
+    """Cloud は st.secrets、ローカルは環境変数 / .env を順に見る。キーはコードに書かない。"""
+    if ENV_PATH.is_file():
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(ENV_PATH, override=False)
+        except Exception:
+            pass
+
+    secret_key = ""
+    try:
+        secret_key = str(st.secrets.get("OPENAI_API_KEY") or "").strip()
+    except Exception:
+        secret_key = ""
+    if secret_key:
+        return secret_key
+    return str(os.environ.get("OPENAI_API_KEY") or "").strip()
 
 SYNTHESIS_IMPURITIES: dict[str, list[str]] = {
     "HFエッチング法": ["NbC", "Al2O3", "Nb", "Al", "C"],
@@ -68,7 +93,12 @@ def impurity_structure(name: str) -> Structure:
 
 
 def load_xy(file) -> pd.DataFrame:
-    raw = file.read()
+    if isinstance(file, (str, Path)):
+        raw = Path(file).read_bytes()
+    else:
+        raw = file.read()
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
     text = raw.decode("utf-8-sig", errors="ignore")
     if text.count("\n") < 2 and "\\n" in text:
         text = text.replace("\\n", "\n")
@@ -214,9 +244,13 @@ def match_score(un_x: np.ndarray, un_y: np.ndarray, imp_x: np.ndarray, tol: floa
 
 
 def diagnose_with_llm(synthesis: str, candidates: pd.DataFrame) -> str:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    api_key = get_openai_api_key()
     if not api_key:
-        raise RuntimeError("環境変数 OPENAI_API_KEY が設定されていません。")
+        raise RuntimeError(
+            "OPENAI_API_KEY が見つかりません。"
+            " Streamlit Cloud では App settings → Secrets に "
+            "OPENAI_API_KEY を設定するか、ローカルでは環境変数または .env を使ってください。"
+        )
 
     rows = []
     for _, row in candidates.iterrows():
@@ -328,6 +362,8 @@ def main() -> None:
     with st.sidebar:
         st.header("データ")
         exp_file = st.file_uploader("実験XRD（.txt / .csv）", type=["txt", "csv"])
+        if SAMPLE_XRD_PATH.is_file() and st.button("サンプルデータを読み込む"):
+            st.session_state["use_sample_xrd"] = True
         cif_file = st.file_uploader("主相CIF（任意）", type=["cif"])
         extra_cifs = st.file_uploader("候補物質CIF（任意・複数）", type=["cif"], accept_multiple_files=True)
 
@@ -344,12 +380,15 @@ def main() -> None:
         run_fit = st.checkbox("a, c を簡易最適化する", value=True)
         show_sim = st.checkbox("理論パターンを曲線でも重ねる", value=True)
 
-    if exp_file is None:
+    if exp_file is not None:
+        st.session_state["use_sample_xrd"] = False
+
+    if exp_file is None and not st.session_state.get("use_sample_xrd"):
         st.info("左のサイドバーから 2θ と Intensity の実験データをアップロードしてください。")
         st.stop()
 
     try:
-        data = load_xy(exp_file)
+        data = load_xy(exp_file if exp_file is not None else SAMPLE_XRD_PATH)
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
         st.stop()
@@ -510,7 +549,10 @@ def main() -> None:
             st.markdown(text)
         except Exception as exc:  # noqa: BLE001
             st.error(str(exc))
-            st.info("PowerShell 例: `$env:OPENAI_API_KEY=\"sk-...\"` のあと `streamlit run app.py`")
+            st.info(
+                "ローカル: `$env:OPENAI_API_KEY=\"sk-...\"` またはアプリ直下の `.env`。"
+                " Cloud: Secrets に `OPENAI_API_KEY = \"sk-...\"` を追加してください。"
+            )
 
 
 if __name__ == "__main__":
